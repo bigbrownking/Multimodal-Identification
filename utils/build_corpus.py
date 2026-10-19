@@ -53,6 +53,7 @@ def pair_row(vid: str, split: str, fp: dict, ir: dict) -> dict:
         "fp_subset":       fp.get("dataset", ""),
         "fp_alteration":   fp.get("alteration", ""),
         "fp_image_path":   fp["image_path"],
+        "fp_image_path_clahe": fp.get("image_path_clahe", ""),
         "fp_quality":      fp["quality_score"],
         "iris_class":      ir["subject_id"],
         "iris_person":     ir["person_id"],
@@ -150,6 +151,7 @@ def verify() -> dict:
                 assert not inter, f"{name}: пересечение {a}/{b}: {sorted(inter)[:5]}"
         checks[name] = "ok"
 
+    # 1. Мономодальные разбиения: люди и классы не пересекаются
     split_of_image = {}
     for mod, d in [("fingerprint", FP_DIR), ("iris", IRIS_DIR)]:
         rows = {s: read_csv(d / f"{s}.csv") for s in SPLIT_NAMES}
@@ -163,6 +165,7 @@ def verify() -> dict:
                                 if r["split"] == "test"}, f"{mod}: test_hard не из test"
         checks[f"{mod}: test_hard только из test"] = "ok"
 
+    # 2. Мультимодальный корпус
     mm = {s: read_csv(MM_DIR / f"{s}.csv") for s in SPLIT_NAMES}
     disjoint("multimodal: виртуальные субъекты", sets(mm, "virtual_id"))
     disjoint("multimodal: люди (отпечатки)", sets(mm, "fp_person"))

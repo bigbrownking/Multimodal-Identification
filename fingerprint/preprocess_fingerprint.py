@@ -10,9 +10,13 @@ load_dotenv()
 
 DATASET_ROOT = Path(os.getenv("SOCOFING_ROOT"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_FINGERPRINT"))
+OUTPUT_DIR_CLAHE = Path(os.getenv("OUTPUT_FINGERPRINT_CLAHE", str(OUTPUT_DIR) + "_clahe"))
 META_PATH = Path(os.getenv("METADATA_FINGERPRINT"))
 TARGET_SIZE = (224, 224)
 QUALITY_THRESH = float(os.getenv("FP_QUALITY_THRESH"))
+GABOR_LAMBDA = 10.0
+GABOR_SIGMA = 4.0
+GABOR_KSIZE = 21
 
 
 SUBSETS = [
@@ -34,27 +38,56 @@ def imwrite_unicode(path: Path, img: np.ndarray) -> None:
         buf.tofile(str(path))
 
 
-def load_and_enhance(path: Path) -> np.ndarray:
+def crop_border(img: np.ndarray, max_trim: int = 12) -> np.ndarray:
+    h, w = img.shape
+
+    def dark(line: np.ndarray) -> bool:
+        return line.mean() < 40
+
+    def gray_line(line: np.ndarray) -> bool:
+        lo, hi = np.percentile(line, [10, 90])
+        return 40 <= line.mean() <= 215 and hi - lo < 25
+
+    def depth(get_line, n: int) -> int:
+        k = 0
+        while k < min(max_trim, n - 1) and dark(get_line(k)):
+            k += 1
+        for j in range(k, min(k + 3, n - 1)):   # линия рамки в 1–3 px от края
+            if gray_line(get_line(j)):
+                k = j + 1
+        return k
+
+    b = h - depth(lambda k: img[h - 1 - k, :], h)
+    r = w - depth(lambda k: img[:b, w - 1 - k], w)
+    t = depth(lambda k: img[k, :r], b)
+    l = depth(lambda k: img[t:b, k], r)
+    return img[t:b, l:r]
+
+
+def gabor_enhance(img: np.ndarray) -> np.ndarray:
+    img = cv2.GaussianBlur(img, (3, 3), sigmaX=0.8)
+    responses = []
+    for theta in np.arange(0, np.pi, np.pi / 8):
+        kernel = cv2.getGaborKernel(
+            (GABOR_KSIZE, GABOR_KSIZE), sigma=GABOR_SIGMA, theta=theta,
+            lambd=GABOR_LAMBDA, gamma=0.5, psi=0, ktype=cv2.CV_32F
+        )
+        kernel -= kernel.mean()          # нулевое среднее: фон не даёт отклика
+        responses.append(cv2.filter2D(img, cv2.CV_32F, kernel))
+    enhanced = np.max(np.stack(responses), axis=0)
+    return cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
+def load_and_enhance(path: Path) -> tuple[np.ndarray, np.ndarray]:
     img = imread_unicode(path)
     if img is None:
         raise FileNotFoundError(f"Не удалось открыть: {path}")
 
+    img = crop_border(img)
+    img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    img = clahe.apply(img)
-    img = cv2.GaussianBlur(img, (3, 3), sigmaX=0.8)
-
-    responses = []
-    for theta in np.arange(0, np.pi, np.pi / 8):
-        kernel = cv2.getGaborKernel(
-            (21, 21), sigma=4.0, theta=theta,
-            lambd=10.0, gamma=0.5, psi=0, ktype=cv2.CV_32F
-        )
-        resp = cv2.filter2D(img, cv2.CV_32F, kernel)
-        responses.append(resp)
-
-    enhanced = np.max(np.stack(responses), axis=0)
-    enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    return cv2.resize(enhanced, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
+    base = clahe.apply(img)
+    return base, gabor_enhance(base)
 
 
 def quality_score(img: np.ndarray) -> float:
@@ -105,9 +138,11 @@ def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
             continue
 
         sample_id = f"{subset_name}_{info['alteration']}"
-        out_dir = OUTPUT_DIR / subset_name / info["person_id"]
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{info['hand']}_{info['finger']}_{info['alteration']}.png"
+        fname = f"{info['hand']}_{info['finger']}_{info['alteration']}.png"
+        out_path = OUTPUT_DIR / subset_name / info["person_id"] / fname
+        out_path_clahe = OUTPUT_DIR_CLAHE / subset_name / info["person_id"] / fname
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path_clahe.parent.mkdir(parents=True, exist_ok=True)
 
         raw = imread_unicode(bmp_path)
         if raw is None:
@@ -115,8 +150,9 @@ def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
         qs = quality_score(raw)
 
         try:
-            enhanced = load_and_enhance(bmp_path)
+            base, enhanced = load_and_enhance(bmp_path)
             imwrite_unicode(out_path, enhanced)
+            imwrite_unicode(out_path_clahe, base)
         except Exception as e:
             print(f"  Ошибка: {bmp_path.name}: {e}")
             continue
@@ -130,6 +166,7 @@ def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
             "finger":        info["finger"],
             "alteration":    info["alteration"],
             "image_path":    str(out_path),
+            "image_path_clahe": str(out_path_clahe),
             "quality_score": round(qs, 4),
             "low_quality":   qs < QUALITY_THRESH,
         })

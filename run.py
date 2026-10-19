@@ -5,6 +5,7 @@
   python run.py --step splits        # train/val/test разбивка по людям
   python run.py --step corpus        # мультимодальный корпус виртуальных субъектов + проверки
   python run.py --step analysis      # статистика + графики
+  python run.py --step visualize     # примеры до/после, проверка сегментации радужки
 """
 
 import argparse
@@ -19,6 +20,7 @@ from fingerprint.preprocess_fingerprint import process_socofing, save_metadata a
 from iris.preprocess_iris import process_dataset, save_metadata as iris_save, INTERVAL_ROOT, THOUSAND_ROOT
 from utils.build_splits import run_all as build_all_splits, METADATA_FINGERPRINT, METADATA_IRIS
 from utils.build_corpus import run as build_corpus
+from utils.visualize_samples import run as visualize_samples
 from utils.analyse_data import (
     load as load_meta_a, print_summary,
     plot_quality, plot_lq_ratio, plot_occlusion, plot_samples_per_class,
@@ -62,12 +64,18 @@ def step_analysis():
     plot_samples_per_class(fp, iris)
 
 
+def step_visualize():
+    print("\n▶ Визуальная проверка предобработки")
+    visualize_samples()
+
+
 STEPS = {
     "fingerprint": step_fingerprint,
     "iris":        step_iris,
     "splits":      step_splits,
     "corpus":      step_corpus,
     "analysis":    step_analysis,
+    "visualize":   step_visualize,
 }
 
 if __name__ == "__main__":
