@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import json
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,24 +64,50 @@ def quality_score(img: np.ndarray) -> float:
     return float(np.clip(0.6 * sharpness + 0.4 * contrast, 0.0, 1.0))
 
 
-def parse_subject(stem: str) -> tuple[str, str]:
-    parts = stem.split("_", 1)
-    return parts[0], parts[1] if len(parts) > 1 else ("unknown", stem)
+FNAME_RE = re.compile(
+    r"^(?P<person>\d+)__(?P<gender>[MF])_(?P<hand>Left|Right)_"
+    r"(?P<finger>thumb|index|middle|ring|little)_finger"
+    r"(?:_(?P<alt>CR|Obl|Zcut))?$",
+    re.IGNORECASE,
+)
+
+
+def parse_filename(stem: str) -> dict | None:
+    m = FNAME_RE.match(stem)
+    if m is None:
+        return None
+    person = m["person"]
+    hand = m["hand"].capitalize()
+    finger = m["finger"].lower()
+    alt = m["alt"] or "none"
+    return {
+        "person_id":  person,
+        "subject_id": f"{person}_{hand}_{finger}",
+        "hand":       hand,
+        "finger":     finger,
+        "alteration": alt,
+    }
 
 
 def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
     bmp_files = sorted(subset_path.glob("*.BMP")) + sorted(subset_path.glob("*.bmp"))
+    bmp_files = sorted(set(bmp_files))
     print(f"\n[{subset_name}] Найдено файлов: {len(bmp_files)}")
 
     all_meta = []
     processed = 0
+    skipped = 0
 
     for bmp_path in bmp_files:
-        subject_id, sample_id = parse_subject(bmp_path.stem)
+        info = parse_filename(bmp_path.stem)
+        if info is None:
+            skipped += 1
+            continue
 
-        out_dir = OUTPUT_DIR / subset_name / subject_id
+        sample_id = f"{subset_name}_{info['alteration']}"
+        out_dir = OUTPUT_DIR / subset_name / info["person_id"]
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{bmp_path.stem}.png"
+        out_path = out_dir / f"{info['hand']}_{info['finger']}_{info['alteration']}.png"
 
         raw = imread_unicode(bmp_path)
         if raw is None:
@@ -96,8 +123,12 @@ def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
 
         all_meta.append({
             "dataset":       subset_name,
-            "subject_id":    subject_id,
+            "person_id":     info["person_id"],
+            "subject_id":    info["subject_id"],
             "sample_id":     sample_id,
+            "hand":          info["hand"],
+            "finger":        info["finger"],
+            "alteration":    info["alteration"],
             "image_path":    str(out_path),
             "quality_score": round(qs, 4),
             "low_quality":   qs < QUALITY_THRESH,
@@ -109,6 +140,8 @@ def process_subset(subset_path: Path, subset_name: str) -> list[dict]:
     lq = sum(1 for r in all_meta if r["low_quality"])
     print(f"  [{subset_name}] Готово: {processed} изображений, "
           f"низкое качество: {lq} ({100*lq/max(processed,1):.1f}%)")
+    if skipped:
+        print(f"  [{subset_name}] Пропущено файлов с нестандартным именем: {skipped}")
     return all_meta
 
 
@@ -128,9 +161,10 @@ def save_metadata(meta: list[dict]) -> None:
     with open(META_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     lq = sum(1 for r in meta if r["low_quality"])
-    subj = len({r["subject_id"] for r in meta})
+    persons = len({r["person_id"] for r in meta})
+    classes = len({r["subject_id"] for r in meta})
     print(f"\nМетаданные сохранены → {META_PATH}")
-    print(f"Итого: {len(meta)} образцов, {subj} субъектов, "
+    print(f"Итого: {len(meta)} образцов, {persons} человек, {classes} классов (пальцев), "
           f"низкое качество: {lq} ({100*lq/max(len(meta),1):.1f}%)")
 
 

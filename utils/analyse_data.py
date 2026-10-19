@@ -123,6 +123,48 @@ def plot_occlusion(iris: list[dict]) -> None:
     print(f"  Saved: {p}")
 
 
+def plot_samples_per_class(fp: list[dict], iris: list[dict]) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    fig.suptitle("Samples per Class (good quality)", fontsize=13, fontweight="bold")
+    for ax, meta, label, color in [
+        (axes[0], fp, "Fingerprint: samples per finger", FP_COLOR),
+        (axes[1], iris, "Iris: samples per eye", IRIS_COLOR),
+    ]:
+        counts: dict[str, int] = {}
+        for r in meta:
+            if not r.get("low_quality"):
+                counts[r["subject_id"]] = counts.get(r["subject_id"], 0) + 1
+        if not counts:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(label)
+            continue
+        vals = np.array(list(counts.values()))
+        bins = np.arange(vals.min(), vals.max() + 2) - 0.5
+        ax.hist(vals, bins=bins, color=color, alpha=0.85, edgecolor="white")
+        ax.axvline(vals.mean(), color="black", lw=1.8, ls="--", label=f"Mean = {vals.mean():.2f}")
+        ax.set_title(f"{label} ({len(vals)} classes)", fontsize=11)
+        ax.set_xlabel("Samples per class")
+        ax.set_ylabel("Classes")
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    p = OUT_DIR / "samples_per_class.png"
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {p}")
+
+
+def class_balance(meta: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    for r in meta:
+        if not r.get("low_quality"):
+            counts[r["subject_id"]] = counts.get(r["subject_id"], 0) + 1
+    if not counts:
+        return "—"
+    v = np.array(list(counts.values()))
+    return f"{v.min()}/{np.median(v):.0f}/{v.max()}"
+
+
 def print_summary(fp: list[dict], iris: list[dict]) -> None:
     print("\n" + "=" * 60)
     print(f"{'Metric':<35} {'Fingerprint':>12} {'Iris':>10}")
@@ -136,9 +178,16 @@ def print_summary(fp: list[dict], iris: list[dict]) -> None:
 
     rows = [
         ("Total samples",          str(len(fp)),  str(len(iris))),
-        ("Unique subjects",
+        ("Persons",
+         str(len({r["person_id"] for r in fp}))    if fp   else "—",
+         str(len({r["person_id"] for r in iris}))  if iris else "—"),
+        ("Classes (finger / eye)",
          str(len({r["subject_id"] for r in fp}))   if fp   else "—",
          str(len({r["subject_id"] for r in iris})) if iris else "—"),
+        ("Samples/class min/med/max", class_balance(fp), class_balance(iris)),
+        ("Mean occlusion ratio",   "—", s(iris, "occlusion_ratio")),
+        ("Pupil not found",        "—",
+         str(sum(1 for r in iris if not r.get("pupil_found", True))) if iris else "—"),
         ("Mean quality score",     s(fp, "quality_score"), s(iris, "quality_score")),
         ("Low-quality count",
          str(sum(1 for r in fp   if r.get("low_quality"))),
@@ -158,4 +207,5 @@ if __name__ == "__main__":
     plot_quality(fp_meta, iris_meta)
     plot_lq_ratio(fp_meta, iris_meta)
     plot_occlusion(iris_meta)
+    plot_samples_per_class(fp_meta, iris_meta)
     print(f"\nAll plots saved to {OUT_DIR}/")

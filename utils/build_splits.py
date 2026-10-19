@@ -1,23 +1,28 @@
-import json
 import csv
+import json
 import os
 import random
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-SEED = 42
+SEED = int(os.getenv("SEED", "42"))
+MIN_SAMPLES = int(os.getenv("MIN_SAMPLES_PER_CLASS", "2"))
 SPLITS = {
     "train": float(os.getenv("SPLIT_TRAIN")),
     "val": float(os.getenv("SPLIT_VAL")),
     "test": float(os.getenv("SPLIT_TEST")),
 }
 
-OUTPUT_SPLITS       = Path(os.getenv("OUTPUT_SPLITS"))
+OUTPUT_SPLITS        = Path(os.getenv("OUTPUT_SPLITS"))
 METADATA_FINGERPRINT = Path(os.getenv("METADATA_FINGERPRINT"))
 METADATA_IRIS        = Path(os.getenv("METADATA_IRIS"))
+
+SPLIT_NAMES = ("train", "val", "test")
+REQUIRED_KEYS = ("person_id", "subject_id", "sample_id", "image_path", "quality_score", "low_quality")
 
 
 def load_meta(path: Path) -> list[dict]:
@@ -25,68 +30,106 @@ def load_meta(path: Path) -> list[dict]:
         print(f"Файл не найден: {path}")
         return []
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        meta = json.load(f)
+    missing = [k for k in REQUIRED_KEYS if meta and k not in meta[0]]
+    if missing:
+        raise SystemExit(
+            f"В {path} нет полей {missing}. Метаданные созданы старой версией "
+            f"предобработки — перезапустите шаг fingerprint / iris."
+        )
+    return meta
 
 
-def make_splits(records: list[dict],
-                out_dir: Path,
-                modality: str) -> None:
-    by_subj: dict[str, list[dict]] = defaultdict(list)
+def assign_persons(persons: list[str], seed: int = SEED) -> dict[str, str]:
+    persons = sorted(persons)
+    rng = random.Random(seed)
+    rng.shuffle(persons)
+    n = len(persons)
+    n_train = round(n * SPLITS["train"])
+    n_val = round(n * SPLITS["val"])
+    out = {}
+    for i, p in enumerate(persons):
+        out[p] = "train" if i < n_train else "val" if i < n_train + n_val else "test"
+    return out
+
+
+def write_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fields = list(rows[0].keys())
+    for r in rows[1:]:
+        for k in r:
+            if k not in fields:
+                fields.append(k)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def make_splits(records: list[dict], out_dir: Path, modality: str) -> dict:
+    person_split = assign_persons(list({r["person_id"] for r in records}))
+
+    by_class: dict[str, list[dict]] = defaultdict(list)
     for r in records:
-        if not r.get("low_quality", False):
-            by_subj[r["subject_id"]].append(r)
+        by_class[r["subject_id"]].append(r)
 
-    subjects = sorted(by_subj.keys())
-    random.seed(SEED)
-    random.shuffle(subjects)
-
-    n = len(subjects)
-    n_train = int(n * SPLITS["train"])
-    n_val   = int(n * SPLITS["val"])
-
-    assignment = {}
-    for s in subjects[:n_train]:
-        assignment[s] = "train"
-    for s in subjects[n_train:n_train + n_val]:
-        assignment[s] = "val"
-    for s in subjects[n_train + n_val:]:
-        assignment[s] = "test"
-
-    split_records: dict[str, list[dict]] = {"train": [], "val": [], "test": []}
-    for subj, recs in by_subj.items():
-        split_name = assignment.get(subj, "test")
-        for r in recs:
-            split_records[split_name].append({**r, "modality": modality})
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for split_name, recs in split_records.items():
-        if not recs:
+    splits = {s: [] for s in SPLIT_NAMES}
+    hard, filtered = [], []
+    for cls, recs in sorted(by_class.items()):
+        split = person_split[recs[0]["person_id"]]
+        good = [r for r in recs if not r["low_quality"]]
+        bad = [r for r in recs if r["low_quality"]]
+        for r in bad:
+            filtered.append({**r, "modality": modality, "split": split, "reason": "low_quality"})
+            if split == "test":
+                hard.append({**r, "modality": modality, "split": "test_hard"})
+        if len(good) < MIN_SAMPLES:
+            for r in good:
+                filtered.append({**r, "modality": modality, "split": split,
+                                 "reason": f"class_has_<{MIN_SAMPLES}_good_samples"})
             continue
-        out_path = out_dir / f"{split_name}.csv"
-        with open(out_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(recs[0].keys()))
-            writer.writeheader()
-            writer.writerows(recs)
+        splits[split] += [{**r, "modality": modality, "split": split} for r in good]
 
-        subj_count = len({str(r["subject_id"]) for r in recs})
-        print(f"  {split_name:5s}: {len(recs):5d} образцов, "
-              f"{subj_count:4d} субъектов → {out_path}")
+    for s in SPLIT_NAMES:
+        write_csv(out_dir / f"{s}.csv", splits[s])
+    write_csv(out_dir / "test_hard.csv", hard)
+    write_csv(out_dir / "filtered_samples.csv", filtered)
+    write_csv(out_dir / "person_split.csv",
+              [{"person_id": p, "split": s} for p, s in sorted(person_split.items())])
+
+    n_persons = len(person_split)
+    summary = {}
+    for s in SPLIT_NAMES:
+        persons = {r["person_id"] for r in splits[s]}
+        classes = {r["subject_id"] for r in splits[s]}
+        share = sum(1 for v in person_split.values() if v == s) / max(n_persons, 1)
+        summary[s] = {"persons": len(persons), "classes": len(classes),
+                      "samples": len(splits[s]), "person_share": round(share, 4)}
+        print(f"  {s:5s}: {len(splits[s]):6d} образцов, {len(classes):5d} классов, "
+              f"{len(persons):4d} людей ({100 * share:.1f}% людей)")
+    summary["test_hard"] = {"samples": len(hard)}
+    summary["filtered"] = {"samples": len(filtered)}
+    print(f"  test_hard: {len(hard)} образцов низкого качества; "
+          f"исключено всего: {len(filtered)} → {out_dir / 'filtered_samples.csv'}")
+    return summary
+
+
+def run_all() -> None:
+    for modality, meta_path in [("fingerprint", METADATA_FINGERPRINT), ("iris", METADATA_IRIS)]:
+        print(f"\n[{modality.upper()}]")
+        meta = load_meta(meta_path)
+        if meta:
+            make_splits(meta, OUTPUT_SPLITS / modality, modality)
+        else:
+            print(f"  Нет данных — сначала запустите предобработку ({modality})")
 
 
 if __name__ == "__main__":
     print("=" * 55)
     print("Построение train/val/test разбивки")
     print("=" * 55)
-
-    for modality, meta_path, out_dir in [
-        ("fingerprint", METADATA_FINGERPRINT, OUTPUT_SPLITS / "fingerprint"),
-        ("iris",        METADATA_IRIS,        OUTPUT_SPLITS / "iris"),
-    ]:
-        print(f"\n[{modality.upper()}]")
-        meta = load_meta(meta_path)
-        if meta:
-            make_splits(meta, out_dir, modality)
-        else:
-            print(f"  Нет данных — сначала запустите preprocess_{modality}.py")
-
+    run_all()
     print("\nГотово!")

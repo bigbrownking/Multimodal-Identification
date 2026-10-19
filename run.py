@@ -2,12 +2,12 @@
   python run.py --step all           # полный пайплайн
   python run.py --step fingerprint   # только отпечатки
   python run.py --step iris          # только радужка
-  python run.py --step splits        # train/val/test разбивка
+  python run.py --step splits        # train/val/test разбивка по людям
+  python run.py --step corpus        # мультимодальный корпус виртуальных субъектов + проверки
   python run.py --step analysis      # статистика + графики
 """
 
 import argparse
-import os
 from pathlib import Path
 import sys
 from dotenv import load_dotenv
@@ -17,13 +17,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fingerprint.preprocess_fingerprint import process_socofing, save_metadata as fp_save
 from iris.preprocess_iris import process_dataset, save_metadata as iris_save, INTERVAL_ROOT, THOUSAND_ROOT
-from utils.build_splits import make_splits, load_meta as bload, METADATA_FINGERPRINT, METADATA_IRIS
+from utils.build_splits import run_all as build_all_splits, METADATA_FINGERPRINT, METADATA_IRIS
+from utils.build_corpus import run as build_corpus
 from utils.analyse_data import (
     load as load_meta_a, print_summary,
-    plot_quality, plot_lq_ratio, plot_occlusion
+    plot_quality, plot_lq_ratio, plot_occlusion, plot_samples_per_class,
 )
-
-OUTPUT_SPLITS = Path(os.getenv("OUTPUT_SPLITS"))
 
 
 def step_fingerprint():
@@ -43,15 +42,13 @@ def step_iris():
 
 
 def step_splits():
-    print("\n▶ Построение разбивки train/val/test")
-    for modality, meta_path, out_dir in [
-        ("fingerprint", METADATA_FINGERPRINT, OUTPUT_SPLITS / "fingerprint"),
-        ("iris",        METADATA_IRIS,        OUTPUT_SPLITS / "iris"),
-    ]:
-        print(f"\n[{modality.upper()}]")
-        meta = bload(meta_path)
-        if meta:
-            make_splits(meta, out_dir, modality)
+    print("\n▶ Построение разбивки train/val/test (по людям)")
+    build_all_splits()
+
+
+def step_corpus():
+    print("\n▶ Мультимодальный корпус виртуальных субъектов")
+    build_corpus()
 
 
 def step_analysis():
@@ -62,12 +59,14 @@ def step_analysis():
     plot_quality(fp, iris)
     plot_lq_ratio(fp, iris)
     plot_occlusion(iris)
+    plot_samples_per_class(fp, iris)
 
 
 STEPS = {
     "fingerprint": step_fingerprint,
     "iris":        step_iris,
     "splits":      step_splits,
+    "corpus":      step_corpus,
     "analysis":    step_analysis,
 }
 
