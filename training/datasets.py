@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from torch.utils.data import DataLoader, Dataset
 
 load_dotenv()
+# Каждый процесс загрузки сам по себе однопоточный: иначе 4 процесса × потоки OpenCV
+# дерутся за 6 ядер и замедляют друг друга
+cv2.setNumThreads(0)
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_SPLITS = ROOT / os.getenv("OUTPUT_SPLITS", "data/splits")
@@ -43,12 +46,20 @@ def jitter(img: np.ndarray, rng: np.random.Generator, a: float, b: float) -> np.
     return np.clip(img.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
 
 
+def border_value(img: np.ndarray, width: int = 4) -> int:
+    """Цвет фона = медиана полосы по краю снимка (у SOCOFing после среза рамки — белый).
+    Раньше бралась медиана всего снимка -> серые клинья в углах после поворота."""
+    ring = np.concatenate([img[:width].ravel(), img[-width:].ravel(),
+                           img[:, :width].ravel(), img[:, -width:].ravel()])
+    return int(np.median(ring))
+
+
 def augment_fp(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     h, w = img.shape
     m = cv2.getRotationMatrix2D((w / 2, h / 2), rng.uniform(-15, 15), rng.uniform(0.95, 1.05))
     m[:, 2] += rng.uniform(-0.05, 0.05, size=2) * (w, h)
     img = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR,
-                         borderMode=cv2.BORDER_CONSTANT, borderValue=int(np.median(img)))
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=border_value(img))
     return jitter(img, rng, 0.10, 10)
 
 

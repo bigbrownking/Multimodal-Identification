@@ -1,0 +1,18 @@
+# Радужка, ResNet-50 (эталонный), базовая конфигурация.
+modality: iris
+backbone: resnet50
+pretrained: true
+embedding_dim: 512
+arcface_s: 30.0
+arcface_m: 0.5
+margin_warmup_epochs: 3
+epochs: 40
+batch_size: 32
+lr: 1.0e-3
+backbone_lr_mult: 0.1
+weight_decay: 1.0e-2
+amp: true
+num_workers: 4
+patience: 8
+seed: 42
+mlflow_experiment: unimodal

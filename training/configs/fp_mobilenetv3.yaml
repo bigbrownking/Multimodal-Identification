@@ -1,0 +1,19 @@
+# Отпечаток, MobileNetV3-Large (лёгкий), базовая конфигурация.
+modality: fingerprint
+backbone: mobilenetv3_large_100
+pretrained: true
+fp_input: clahe
+embedding_dim: 512
+arcface_s: 30.0
+arcface_m: 0.5
+margin_warmup_epochs: 3
+epochs: 30
+batch_size: 64
+lr: 1.0e-3
+backbone_lr_mult: 0.1
+weight_decay: 1.0e-2
+amp: true
+num_workers: 4
+patience: 8
+seed: 42
+mlflow_experiment: unimodal
