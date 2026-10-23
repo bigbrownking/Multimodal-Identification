@@ -32,7 +32,7 @@ def row(m: dict) -> dict:
 
 def main() -> None:
     rows = []
-    for f in sorted(RUNS_DIR.glob("*/metrics.json")):
+    for f in sorted(RUNS_DIR.glob("*/metrics.json")) + sorted(RUNS_DIR.glob("*/eval_*/metrics.json")):
         with open(f, encoding="utf-8") as fh:
             rows.append(row(json.load(fh)))
     if not rows:

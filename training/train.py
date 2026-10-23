@@ -1,3 +1,20 @@
+"""
+Базовые мономодальные модели: отпечаток / радужка.
+
+  python training/train.py --config training/configs/socofing_resnet50.yaml
+  python training/train.py --config training/configs/iris_resnet50.yaml --set lr=5e-4 arcface_m=0.4
+  python training/train.py --resume runs/socofing_resnet50_20261022-1000  # продолжить после остановки
+  python training/train.py --eval-only runs/socofing_resnet50_20261022-1000  # только финальная оценка best.pt
+  python training/train.py --eval-only runs/<прогон SOCOFing> --set modality=fingerprint_sd302  # на другом наборе
+  python training/summarize.py                                             # сводная таблица всех прогонов
+
+Модель: timm backbone (ImageNet) -> global avg pool -> Linear(512) -> BN = эмбеддинг.
+Обучение: голова ArcFace по классам train (s, m), AMP fp16, AdamW, warmup + cosine.
+Отбор: лучшая эпоха по EER на val (пары «тот же / другой»).
+Финал: val (порог EER) -> test: EER, AUC, TAR@FAR, FAR/FRR/accuracy/precision/recall/F1
+при пороге с val, rank-1/rank-5 (галерея / пробы), разбивка по группам, время инференса.
+Всё пишется в runs/<имя>/ и в MLflow (mlflow ui --backend-store-uri sqlite:///mlflow.db).
+"""
 import argparse
 import copy
 import csv
@@ -7,7 +24,6 @@ import os
 import random
 import subprocess
 import sys
-import mlflow
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -22,20 +38,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
+import mlflow
 
 warnings.filterwarnings("ignore", message=r"Detected call of `lr_scheduler.step\(\)` before")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from training.datasets import BiometricDataset, make_loader  # noqa: E402
+from training.datasets import BiometricDataset, canonical, make_loader  # noqa: E402
 
 RUNS_DIR = ROOT / "runs"
 
 DEFAULTS = {
-    "modality": "fingerprint",
+    "modality": "fingerprint_socofing",
     "backbone": "resnet50",
     "pretrained": True,
+    "init_from": "",
     "fp_input": "clahe",
     "embedding_dim": 512,
     "dropout": 0.0,
@@ -65,13 +83,15 @@ DEFAULTS = {
     "run_name": "",
 }
 
-INPUT_SHAPE = {"fingerprint": (3, 224, 224), "iris": (3, 64, 512)}
+INPUT_SHAPE = {"fingerprint_socofing": (3, 224, 224), "fingerprint_sd302": (3, 224, 224), "iris": (3, 64, 512)}
+RUN_PREFIX = {"fingerprint_socofing": "socofing", "fingerprint_sd302": "sd302", "iris": "iris"}
 
 
 # ======================================================================
 # Конфиг, логирование, воспроизводимость
 # ======================================================================
 def coerce(cfg: dict) -> dict:
+    """YAML читает 1e-3 как строку — приводим к типу значения по умолчанию."""
     out = dict(cfg)
     for k, v in cfg.items():
         if k not in DEFAULTS:
@@ -97,7 +117,8 @@ def load_config(path: str | None, overrides: list[str]) -> dict:
         k, _, v = kv.partition("=")
         cfg[k.strip()] = yaml.safe_load(v)
     cfg = coerce(cfg)
-    assert cfg["modality"] in ("fingerprint", "iris"), cfg["modality"]
+    cfg["modality"] = canonical(cfg["modality"])
+    assert cfg["modality"] in INPUT_SHAPE, f"modality: {cfg['modality']} — допустимо {list(INPUT_SHAPE)}"
     return cfg
 
 
@@ -146,10 +167,16 @@ class Tracker:
             os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
             mlflow.set_tracking_uri(cfg["mlflow_uri"] or "sqlite:///" + (ROOT / "mlflow.db").as_posix())
             mlflow.set_experiment(cfg["mlflow_experiment"])
-            run = mlflow.start_run(run_id=run_id, run_name=cfg["run_name"])
+            try:
+                run = mlflow.start_run(run_id=run_id, run_name=cfg["run_name"])
+            except Exception:
+                if run_id is None:
+                    raise
+                print(f"[i] MLflow: запись {run_id} не найдена — создаю новую")
+                run = mlflow.start_run(run_name=cfg["run_name"])
             self.ml, self.run_id = mlflow, run.info.run_id
             print(f"MLflow: эксперимент '{cfg['mlflow_experiment']}', run_id {self.run_id}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"[!] MLflow недоступен ({e}) — пишу только в папку прогона")
 
     def _call(self, fn, *a, **kw):
@@ -157,7 +184,7 @@ class Tracker:
             return
         try:
             fn(*a, **kw)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"[!] MLflow: {e}")
 
     def params(self, d: dict):
@@ -238,7 +265,6 @@ def lr_lambda(total: int, warm: int, min_ratio: float):
             return (step + 1) / warm
         p = (step - warm) / max(1, total - warm)
         return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * min(p, 1.0)))
-
     return f
 
 
@@ -252,7 +278,7 @@ def nonfinite_state(model: nn.Module) -> list[str]:
 
 
 @torch.no_grad()
-def extract(model: nn.Module, loader, device: torch.device) -> np.ndarray:
+def extract(model: nn.Module, loader, device: torch.device, amp: bool = False) -> np.ndarray:
     model.eval()
     out = []
     for x, _ in loader:
@@ -387,7 +413,10 @@ def group_breakdown(E, labels, rows, modality: str, n_imp: int, seed: int) -> di
     gal = gallery_index(rows, labels)
     groups: dict[str, list[int]] = defaultdict(list)
     for i, r in enumerate(rows):
-        if modality == "fingerprint":
+        if modality.startswith("fingerprint") and r.get("dataset") == "SD302":
+            groups[f"device/{r.get('device', '')}"].append(i)
+            groups[f"capture/{r.get('capture', '')}"].append(i)
+        elif modality.startswith("fingerprint"):
             ds = r.get("dataset", "")
             if ds and ds != "Real":
                 groups[f"level/{ds}"].append(i)
@@ -520,7 +549,7 @@ def make_eval_set(cfg: dict, split: str, nw: int):
 
 
 def evaluate_val(model, ds, loader, device, cfg) -> dict:
-    E = extract(model, loader, device)
+    E = extract(model, loader, device, cfg["amp"])
     labels = np.asarray(ds.labels)
     res, _, _, _ = verify_split(E, labels, cfg["val_impostors"], cfg["seed"])
     gal = gallery_index(ds.rows, labels)
@@ -618,6 +647,17 @@ def train(cfg: dict, run_dir: Path, resume: bool) -> None:
           f"val {len(val_ds)} / {val_ds.num_classes}")
 
     model = EmbeddingNet(cfg["backbone"], cfg["embedding_dim"], cfg["pretrained"], cfg["dropout"]).to(device)
+    if cfg["init_from"] and not resume:
+        src = Path(cfg["init_from"])
+        src = src if src.is_absolute() else ROOT / src
+        src = src / "best.pt" if src.is_dir() else src
+        ck0 = torch.load(src, map_location=device, weights_only=False)
+        src_cfg = ck0.get("config", {})
+        if src_cfg.get("backbone", cfg["backbone"]) != cfg["backbone"]:
+            raise SystemExit(f"init_from: backbone {src_cfg.get('backbone')} не совпадает с {cfg['backbone']}")
+        model.load_state_dict(ck0["model"])
+        print(f"Начальные веса: {src} (обучена на {src_cfg.get('modality', '?')}, "
+              f"эпоха {ck0.get('epoch', -1) + 1}); голова ArcFace — новая")
     head = ArcFace(cfg["embedding_dim"], train_ds.num_classes, cfg["arcface_s"], cfg["arcface_m"]).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Модель: {cfg['backbone']} -> {cfg['embedding_dim']}, {n_params:.1f} M параметров; "
@@ -738,8 +778,10 @@ def save_embeddings(path: Path, E: np.ndarray, ds: BiometricDataset) -> None:
 
 
 def final_evaluation(cfg: dict, run_dir: Path, device: torch.device, tracker: Tracker,
-                     history: list[dict] | None = None) -> dict:
-    print("\n" + "=" * 60 + "\nФИНАЛЬНАЯ ОЦЕНКА (best.pt)\n" + "=" * 60)
+                     history: list[dict] | None = None, out_dir: Path | None = None) -> dict:
+    out_dir = out_dir or run_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print("\n" + "=" * 60 + f"\nФИНАЛЬНАЯ ОЦЕНКА (best.pt) на {cfg['modality']}\n" + "=" * 60)
     ck = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
     model = EmbeddingNet(cfg["backbone"], cfg["embedding_dim"], pretrained=False, dropout=cfg["dropout"])
     model.load_state_dict(ck["model"])
@@ -750,7 +792,7 @@ def final_evaluation(cfg: dict, run_dir: Path, device: torch.device, tracker: Tr
     results, curves, extra = {}, {}, {}
     for split in ("val", "test"):
         ds, loader = make_eval_set(cfg, split, nw)
-        E = extract(model, loader, device)
+        E = extract(model, loader, device, cfg["amp"])
         del loader
         labels = np.asarray(ds.labels)
         res, curve, gen, imp = verify_split(E, labels, n_imp, seed)
@@ -759,7 +801,7 @@ def final_evaluation(cfg: dict, run_dir: Path, device: torch.device, tracker: Tr
                     (gallery_probe_eval(E, labels, gal, range(len(labels)), n_imp, seed) or {}).items()})
         results[split], curves[split] = res, curve
         extra[split] = (E, labels, ds, gen, imp)
-        save_embeddings(run_dir / f"embeddings_{split}.npz", E, ds)
+        save_embeddings(out_dir / f"embeddings_{split}.npz", E, ds)
         print(f"  {split:4s}: {len(ds)} образцов, {ds.num_classes} классов | EER {100 * res['eer']:.2f}% "
               f"(порог {res['eer_threshold']:.3f}), AUC {res['auc']:.4f}, "
               f"TAR@FAR=0.1% {100 * res.get('tar_at_far_1e-3', float('nan')):.1f}%, "
@@ -784,19 +826,19 @@ def final_evaluation(cfg: dict, run_dir: Path, device: torch.device, tracker: Tr
     timing["params_m"] = sum(p.numel() for p in model.parameters()) / 1e6
     print("  Время на 1 изображение: " + ", ".join(f"{k} {v:.1f}" for k, v in timing.items()))
 
-    plot_roc_det(curves, run_dir / "roc_det.png", title)
-    plot_scores(gen_t, imp_t, thr, run_dir / "score_distribution.png", f"{title}: test")
-    plot_groups(groups, run_dir / "groups_test.png", f"{title}: test по группам")
+    plot_roc_det(curves, out_dir / "roc_det.png", title)
+    plot_scores(gen_t, imp_t, thr, out_dir / "score_distribution.png", f"{title}: test")
+    plot_groups(groups, out_dir / "groups_test.png", f"{title}: test по группам")
 
     metrics = {"run_name": cfg["run_name"], "modality": cfg["modality"], "backbone": cfg["backbone"],
-               "fp_input": cfg["fp_input"] if cfg["modality"] == "fingerprint" else "",
+               "fp_input": cfg["fp_input"] if cfg["modality"].startswith("fingerprint") else "",
                "arcface_s": cfg["arcface_s"], "arcface_m": cfg["arcface_m"], "lr": cfg["lr"],
                "best_epoch": int(ck["epoch"]) + 1,
                "epochs_trained": len(history) if history else None,
                "val": results["val"], "test": results["test"],
                "test_at_val_threshold": op, "test_groups": groups, "timing": timing,
                **git_info()}
-    with open(run_dir / "metrics.json", "w", encoding="utf-8") as f:
+    with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     flat = {f"final_{s}_{k}": v for s in ("val", "test") for k, v in results[s].items()
@@ -810,8 +852,8 @@ def final_evaluation(cfg: dict, run_dir: Path, device: torch.device, tracker: Tr
     tracker.metrics(flat)
     for f in ("metrics.json", "roc_det.png", "score_distribution.png", "groups_test.png",
               "best.pt", "train.log"):
-        tracker.artifact(run_dir / f)
-    print(f"\nРезультаты: {run_dir}")
+        tracker.artifact((run_dir if f in ("best.pt", "train.log") else out_dir) / f)
+    print(f"\nРезультаты: {out_dir}")
     return metrics
 
 
@@ -828,31 +870,42 @@ def main() -> None:
     existing = str(Path(args.resume or args.eval_only).resolve()) if (args.resume or args.eval_only) else None
     os.chdir(ROOT)
 
+    out_dir = None
     if existing:
         run_dir = Path(existing)
         cfg = load_config(str(run_dir / "config.yaml"), args.set)
+        trained_on = load_config(str(run_dir / "config.yaml"), [])["modality"]
+        if args.eval_only and cfg["modality"] != trained_on:
+            if not (cfg["modality"].startswith("fingerprint") and trained_on.startswith("fingerprint")):
+                raise SystemExit("Перекрёстная проверка возможна только между наборами отпечатков")
+            out_dir = run_dir / f"eval_{cfg['modality']}"
+            cfg["run_name"] = f"{cfg['run_name']}_on_{cfg['modality']}"
     else:
         cfg = load_config(config_path, args.set)
         if not cfg["run_name"]:
             short = {"mobilenetv3_large_100": "mobilenetv3"}.get(cfg["backbone"], cfg["backbone"])
-            prefix = "fp" if cfg["modality"] == "fingerprint" else "iris"
+            prefix = RUN_PREFIX[cfg["modality"]]
             cfg["run_name"] = f"{prefix}_{short}_{datetime.now():%Y%m%d-%H%M}"
         run_dir = RUNS_DIR / cfg["run_name"]
         run_dir.mkdir(parents=True, exist_ok=True)
         with open(run_dir / "config.yaml", "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
-    sys.stdout = Tee(run_dir / "train.log")
+    if out_dir is None:
+        sys.stdout = Tee(run_dir / "train.log")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sys.stdout = Tee(out_dir / "eval.log")
     print(f"\n##### {cfg['run_name']}  ({datetime.now():%Y-%m-%d %H:%M})  torch {torch.__version__}")
     seed_all(cfg["seed"])
 
     if args.eval_only:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         run_id = None
-        if (run_dir / "last.pt").exists():
+        if out_dir is None and (run_dir / "last.pt").exists():
             run_id = torch.load(run_dir / "last.pt", map_location="cpu", weights_only=False).get("mlflow_run_id")
         tracker = Tracker(cfg, run_id)
-        final_evaluation(cfg, run_dir, device, tracker)
+        final_evaluation(cfg, run_dir, device, tracker, out_dir=out_dir)
         tracker.end()
     else:
         train(cfg, run_dir, resume=bool(args.resume))

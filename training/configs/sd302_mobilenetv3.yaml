@@ -1,0 +1,20 @@
+# Отпечаток NIST SD 302 (настоящие повторные прикладывания), MobileNetV3-Large (лёгкий). Неделя 7, базовая конфигурация (раздел 8).
+# Остальные параметры — DEFAULTS в training/train.py; переопределить: --set key=value
+modality: fingerprint_sd302
+backbone: mobilenetv3_large_100
+pretrained: true
+fp_input: clahe           # для SD302 Габор не считается
+embedding_dim: 512
+arcface_s: 30.0
+arcface_m: 0.5
+margin_warmup_epochs: 3
+epochs: 40                # классов меньше, снимков на палец 4–8
+batch_size: 64
+lr: 1.0e-3                # проекция + ArcFace; backbone = lr * backbone_lr_mult
+backbone_lr_mult: 0.1
+weight_decay: 1.0e-2
+amp: true                 # на GTX 16xx код сам выключает (fp16 там даёт NaN)
+num_workers: 4
+patience: 8
+seed: 42
+mlflow_experiment: unimodal

@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import json
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -371,18 +372,35 @@ def process_dataset(root: Path, ds_name: str) -> list[dict]:
     return all_meta
 
 
-def save_metadata(meta: list[dict]) -> None:
+IRIS_DATASETS = {"Interval": INTERVAL_ROOT, "Thousand": THOUSAND_ROOT}
+
+
+def save_metadata(meta: list[dict], replace: set[str] | None = None) -> None:
     META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if replace and META_PATH.exists():
+        with open(META_PATH, encoding="utf-8") as f:
+            old = [r for r in json.load(f) if r.get("dataset") not in replace]
+        meta = old + meta
     with open(META_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"\nМетаданные сохранены → {META_PATH}")
+    by_ds = {}
+    for r in meta:
+        by_ds[r.get("dataset", "?")] = by_ds.get(r.get("dataset", "?"), 0) + 1
+    print(f"\nМетаданные сохранены → {META_PATH}  (в файле: {by_ds})")
+
+
+def run_iris(datasets: tuple[str, ...] = ("Interval", "Thousand")) -> list[dict]:
+    meta = []
+    for name in datasets:
+        meta += process_dataset(IRIS_DATASETS[name], name)
+    if not meta:
+        print("Изображения радужки не найдены. Проверьте CASIA_INTERVAL_ROOT / CASIA_THOUSAND_ROOT.")
+        return []
+    full = set(datasets) == set(IRIS_DATASETS)
+    save_metadata(meta, replace=None if full else set(datasets))
+    return meta
 
 
 if __name__ == "__main__":
-    all_meta = []
-    all_meta += process_dataset(INTERVAL_ROOT, "Interval")
-    all_meta += process_dataset(THOUSAND_ROOT, "Thousand")
-    if all_meta:
-        save_metadata(all_meta)
-    else:
-        print("Изображения не найдены. Проверьте пути в начале файла.")
+    which = (sys.argv[1] if len(sys.argv) > 1 else "all").lower()
+    run_iris({"interval": ("Interval",), "thousand": ("Thousand",)}.get(which, ("Interval", "Thousand")))

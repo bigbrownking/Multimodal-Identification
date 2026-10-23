@@ -22,7 +22,8 @@ from iris.preprocess_iris import occlusion_mask
 SEED = int(os.getenv("SEED", "42"))
 OUT_DIR = Path(os.getenv("OUTPUT_ANALYSIS"))
 SOCOFING_ROOT = Path(os.getenv("SOCOFING_ROOT"))
-META_FP = Path(os.getenv("METADATA_FINGERPRINT"))
+META_FP = Path(os.getenv("METADATA_SOCOFING") or os.getenv("METADATA_FINGERPRINT")
+               or "data/processed/fingerprint_socofing_metadata.json")
 META_IRIS = Path(os.getenv("METADATA_IRIS"))
 
 

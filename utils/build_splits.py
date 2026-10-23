@@ -18,7 +18,8 @@ SPLITS = {
 }
 
 OUTPUT_SPLITS        = Path(os.getenv("OUTPUT_SPLITS"))
-METADATA_FINGERPRINT = Path(os.getenv("METADATA_FINGERPRINT"))
+METADATA_FINGERPRINT = Path(os.getenv("METADATA_SOCOFING") or os.getenv("METADATA_FINGERPRINT")
+                            or "data/processed/fingerprint_socofing_metadata.json")
 METADATA_IRIS        = Path(os.getenv("METADATA_IRIS"))
 
 SPLIT_NAMES = ("train", "val", "test")
@@ -117,14 +118,27 @@ def make_splits(records: list[dict], out_dir: Path, modality: str) -> dict:
     return summary
 
 
+METADATA_SD302 = Path(os.getenv("METADATA_SD302", "data/processed/fingerprint_sd302_metadata.json"))
+
+def run_sd302() -> None:
+    print("\n[FINGERPRINT_SD302]")
+    meta = load_meta(METADATA_SD302)
+    if meta:
+        make_splits(meta, OUTPUT_SPLITS / "fingerprint_sd302", "fingerprint_sd302")
+    else:
+        print("  Нет данных — сначала запустите предобработку SD302")
+
+
 def run_all() -> None:
-    for modality, meta_path in [("fingerprint", METADATA_FINGERPRINT), ("iris", METADATA_IRIS)]:
+    for modality, meta_path in [("fingerprint_socofing", METADATA_FINGERPRINT), ("iris", METADATA_IRIS)]:
         print(f"\n[{modality.upper()}]")
         meta = load_meta(meta_path)
         if meta:
             make_splits(meta, OUTPUT_SPLITS / modality, modality)
         else:
             print(f"  Нет данных — сначала запустите предобработку ({modality})")
+    if METADATA_SD302.exists():
+        run_sd302()
 
 
 if __name__ == "__main__":

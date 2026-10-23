@@ -11,9 +11,15 @@ load_dotenv()
 
 SEED = int(os.getenv("SEED", "42"))
 OUTPUT_SPLITS = Path(os.getenv("OUTPUT_SPLITS"))
-FP_DIR = OUTPUT_SPLITS / "fingerprint"
 IRIS_DIR = OUTPUT_SPLITS / "iris"
-MM_DIR = OUTPUT_SPLITS / "multimodal"
+# Корпус = набор отпечатков × радужка CASIA. Строятся независимо, каждый со своими проверками.
+#   multimodal_socofing — синтетические искажения отпечатка (Real/Easy/Medium/Hard): сценарий
+#                         «отпечаток повреждён»; на чистых снимках отпечаток ~безошибочен
+#   multimodal_sd302    — настоящие повторные прикладывания с разных сенсоров: основной корпус
+CORPORA = {
+    "multimodal_socofing": "fingerprint_socofing",
+    "multimodal_sd302": "fingerprint_sd302",
+}
 
 SPLIT_NAMES = ("train", "val", "test")
 
@@ -52,6 +58,7 @@ def pair_row(vid: str, split: str, fp: dict, ir: dict) -> dict:
         "fp_sample":       fp["sample_id"],
         "fp_subset":       fp.get("dataset", ""),
         "fp_alteration":   fp.get("alteration", ""),
+        "fp_device":       fp.get("device", ""),
         "fp_image_path":   fp["image_path"],
         "fp_image_path_clahe": fp.get("image_path_clahe", ""),
         "fp_quality":      fp["quality_score"],
@@ -66,7 +73,7 @@ def pair_row(vid: str, split: str, fp: dict, ir: dict) -> dict:
     }
 
 
-def build() -> dict:
+def build(FP_DIR: Path, MM_DIR: Path) -> dict:
     rng = random.Random(SEED)
     fp_split = {s: read_csv(FP_DIR / f"{s}.csv") for s in SPLIT_NAMES}
     ir_split = {s: read_csv(IRIS_DIR / f"{s}.csv") for s in SPLIT_NAMES}
@@ -138,7 +145,7 @@ def build() -> dict:
     return summary
 
 
-def verify() -> dict:
+def verify(FP_DIR: Path, MM_DIR: Path) -> dict:
     checks = {}
 
     def sets(rows, key):
@@ -153,7 +160,7 @@ def verify() -> dict:
 
     # 1. Мономодальные разбиения: люди и классы не пересекаются
     split_of_image = {}
-    for mod, d in [("fingerprint", FP_DIR), ("iris", IRIS_DIR)]:
+    for mod, d in [(FP_DIR.name, FP_DIR), ("iris", IRIS_DIR)]:
         rows = {s: read_csv(d / f"{s}.csv") for s in SPLIT_NAMES}
         disjoint(f"{mod}: люди", sets(rows, "person_id"))
         disjoint(f"{mod}: классы", sets(rows, "subject_id"))
@@ -194,13 +201,21 @@ def verify() -> dict:
     return checks
 
 
-def run() -> None:
-    summary = build()
-    summary["checks"] = verify()
-    MM_DIR.mkdir(parents=True, exist_ok=True)
-    with open(MM_DIR / "corpus_summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-    print(f"\n  Сводка → {MM_DIR / 'corpus_summary.json'}")
+def run(names: list[str] | None = None) -> None:
+    for name in names or list(CORPORA):
+        fp_mod = CORPORA[name]
+        fp_dir, mm_dir = OUTPUT_SPLITS / fp_mod, OUTPUT_SPLITS / name
+        print(f"\n[{name.upper()}]  {fp_mod} × iris")
+        if not (fp_dir / "train.csv").exists():
+            print(f"  Нет разбиения {fp_dir} — сначала шаги предобработки и splits; пропуск")
+            continue
+        summary = build(fp_dir, mm_dir)
+        summary["fingerprint_source"] = fp_mod
+        summary["checks"] = verify(fp_dir, mm_dir)
+        mm_dir.mkdir(parents=True, exist_ok=True)
+        with open(mm_dir / "corpus_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print(f"\n  Сводка → {mm_dir / 'corpus_summary.json'}")
 
 
 if __name__ == "__main__":

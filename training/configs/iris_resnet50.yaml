@@ -1,4 +1,5 @@
-# Радужка, ResNet-50 (эталонный), базовая конфигурация.
+# Радужка, ResNet-50 (эталонный). Неделя 7, базовая конфигурация (раздел 8).
+# Остальные параметры — DEFAULTS в training/train.py; переопределить: --set key=value
 modality: iris
 backbone: resnet50
 pretrained: true
@@ -8,10 +9,10 @@ arcface_m: 0.5
 margin_warmup_epochs: 3
 epochs: 40
 batch_size: 32
-lr: 1.0e-3
+lr: 1.0e-3                # проекция + ArcFace; backbone = lr * backbone_lr_mult
 backbone_lr_mult: 0.1
 weight_decay: 1.0e-2
-amp: true
+amp: true                 # на GTX 16xx код сам выключает (fp16 там даёт NaN)
 num_workers: 4
 patience: 8
 seed: 42
