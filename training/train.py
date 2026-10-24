@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", message=r"Detected call of `lr_scheduler.step\
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from training.datasets import BiometricDataset, canonical, make_loader  # noqa: E402
+from training.datasets import BiometricDataset, canonical, make_loader
 
 RUNS_DIR = ROOT / "runs"
 
@@ -176,7 +176,7 @@ class Tracker:
                 run = mlflow.start_run(run_name=cfg["run_name"])
             self.ml, self.run_id = mlflow, run.info.run_id
             print(f"MLflow: эксперимент '{cfg['mlflow_experiment']}', run_id {self.run_id}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[!] MLflow недоступен ({e}) — пишу только в папку прогона")
 
     def _call(self, fn, *a, **kw):
@@ -184,7 +184,7 @@ class Tracker:
             return
         try:
             fn(*a, **kw)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"[!] MLflow: {e}")
 
     def params(self, d: dict):
@@ -493,7 +493,7 @@ def plot_roc_det(curves: dict, path: Path, title: str) -> None:
     ax[1].plot(norm.ppf([1e-5, 0.6]), norm.ppf([1e-5, 0.6]), "k:", lw=0.8, label="EER")
     for a in ax:
         a.grid(alpha=0.3, which="both")
-        a.legend()
+        a.legend(fontsize=7 if len(curves) > 3 else 9, loc="lower right" if a is ax[0] else "upper right")
     fig.suptitle(title, fontweight="bold")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
